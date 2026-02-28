@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Зависимости
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Код
+COPY backend/ .
+
+# Порт
+EXPOSE 8000
+
+# Entrypoint
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
