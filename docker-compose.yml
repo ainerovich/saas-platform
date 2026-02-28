@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: saas_postgres
+    environment:
+      POSTGRES_DB: saas_platform
+      POSTGRES_USER: saas_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "5432:5432"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saas_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (кэш + Celery broker)
+  redis:
+    image: redis:7-alpine
+    container_name: saas_redis
+    ports:
+      - "6379:6379"
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: saas_backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://saas_user:${DB_PASSWORD}@postgres:5432/saas_platform
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY}
+    volumes:
+      - ./backend:/app
+      - /var/www/avito-parser:/modules/avito-parser:ro
+      - /var/www/vpn-service:/modules/vpn-service:ro
+    ports:
+      - "8000:8000"
+    restart: always
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker (фоновые задачи)
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: saas_celery
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://saas_user:${DB_PASSWORD}@postgres:5432/saas_platform
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - /var/www/avito-parser:/modules/avito-parser:ro
+      - /var/www/vpn-service:/modules/vpn-service:ro
+    restart: always
+    command: celery -A core.celery_app worker --loglevel=info
+
+  # Celery Beat (планировщик)
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: saas_beat
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://saas_user:${DB_PASSWORD}@postgres:5432/saas_platform
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    restart: always
+    command: celery -A core.celery_app beat --loglevel=info
+
+  # Frontend (React)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    container_name: saas_frontend
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    restart: always
+    environment:
+      VITE_API_URL: http://localhost:8000
+
+  # Nginx (reverse proxy)
+  nginx:
+    image: nginx:alpine
+    container_name: saas_nginx
+    depends_on:
+      - backend
+      - frontend
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/sites:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: always
+
+volumes:
+  postgres_data:
